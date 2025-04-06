@@ -3,7 +3,7 @@ export const CONFIG = {
     YOUTUBE_API_KEY: 'AIzaSyBwm9HHJJQqzyeQFrItPmUjgHfK7HkysUw',
     
     // Gemini API Key - you should replace this with your actual key
-    GEMINI_API_KEY: 'YOUR_GEMINI_API_KEY',
+    GEMINI_API_KEY: 'AIzaSyAZfSRZqyGyN2WJbkHntge7KjVkwydhPX8',
     
     // Gemini API Endpoint
     API_ENDPOINT: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent',

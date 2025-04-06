@@ -181,7 +181,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             console.log("Processing uploaded analyzed data for Gemini API", request.data);
             
             // Store the analyzed data for future use with Gemini API
-            chrome.storage.local.set({ userAnalysis: request.data }, () => {
+            chrome.storage.local.set({ userAnalysis: request.data }, function() {
                 // Update the current analysis data in memory
                 userAnalysisData = request.data;
                 
@@ -192,9 +192,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     console.log("Re-analyzing current video with new analysis data");
                 }
                 
+                // Important: Make sure we send a response back to the popup
                 sendResponse({ 
                     success: true, 
-                    message: "Analyzed data processed successfully and will be used with Gemini API"
+                    message: "Analyzed data processed successfully" 
                 });
             });
             
@@ -205,7 +206,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 success: false, 
                 error: error.message || "Unknown error processing data" 
             });
-            return true;
         }
     }
     
@@ -472,6 +472,8 @@ function analyzeCurrentVideo(videoId) {
 }
 
 // Function to send video data to Gemini API
+// Fix the sendToGeminiAPI function to properly handle and return the Gemini response
+
 async function sendToGeminiAPI(videoData) {
     try {
         console.log('Sending to Gemini API:', videoData.title);
@@ -480,18 +482,39 @@ async function sendToGeminiAPI(videoData) {
         const isShortForm = videoData.isShort;
         const contentFormat = isShortForm ? "short-form" : "long-form";
         
+        // Get user analyzed data from storage
+        const userAnalysis = await new Promise(resolve => {
+            chrome.storage.local.get(['userAnalysis'], result => {
+                resolve(result.userAnalysis || {});
+            });
+        });
+        
+        // Format user data section for prompt
+        let userDataText = '';
+        if (userAnalysis && Object.keys(userAnalysis).length > 0) {
+            userDataText = `
+USER ANALYZED DATA:
+${JSON.stringify(userAnalysis, null, 2)}
+`;
+        }
+        
         // Create prompt for Gemini API
-        const prompt = {
-            contents: [
-                {
-                    role: "system",
-                    parts: [{ text: CONFIG.SYSTEM_PROMPT }]
-                },
-                {
-                    role: "user",
-                    parts: [{ 
-                        text: `Analyze this YouTube video:
-                        
+        const response = await fetch(`${CONFIG.API_ENDPOINT}?key=${CONFIG.GEMINI_API_KEY}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                contents: [
+                    {
+                        role: "system",
+                        parts: [{ text: CONFIG.SYSTEM_PROMPT }]
+                    },
+                    {
+                        role: "user",
+                        parts: [{ 
+                            text: `Analyze this YouTube video:
+                            
 VIDEO METADATA:
 Title: ${videoData.title}
 Channel: ${videoData.channelTitle}
@@ -500,19 +523,11 @@ Format: ${contentFormat}
 Views: ${videoData.views || 'Unknown'}
 Publication Date: ${videoData.publishedAt || 'Unknown'}
 Duration: ${formatDuration(videoData.duration)}
-`
-                    }]
-                }
-            ]
-        };
-        
-        // Call Gemini API
-        const response = await fetch(`${CONFIG.API_ENDPOINT}?key=${CONFIG.GEMINI_API_KEY}`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(prompt)
+${userDataText}`
+                        }]
+                    }
+                ]
+            })
         });
         
         if (!response.ok) {
@@ -521,34 +536,50 @@ Duration: ${formatDuration(videoData.duration)}
         
         const data = await response.json();
         
-        // Extract analysis from Gemini response
-        const analysisText = data.candidates[0].content.parts[0].text;
+        // Parse Gemini's response
+        let geminiResult;
+        try {
+            // Extract the text content from Gemini's response
+            const responseText = data.candidates[0].content.parts[0].text;
+            // Parse the JSON part of the response
+            geminiResult = JSON.parse(responseText);
+            console.log('Gemini analysis result:', geminiResult);
+        } catch (parseError) {
+            console.error('Error parsing Gemini response:', parseError);
+            // Fall back to default analysis
+            geminiResult = {
+                classification: "distracting",
+                recommendedTime: 15,
+                reason: "Unable to analyze this content properly",
+                potentialTransitions: ["Education", "Science & Technology"]
+            };
+        }
         
-        // Clean the response text (remove markdown formatting if present)
-        const cleanedText = analysisText.replace(/```json|```/g, '').trim();
+        // Return a standardized format for the UI
+        return {
+            isProductive: geminiResult.classification === "productive",
+            recommendedTime: geminiResult.recommendedTime || 15,
+            analysisReason: geminiResult.reason || "No reason provided",
+            potentialTransitions: geminiResult.potentialTransitions || [],
+            // Keep original data for reference
+            videoId: videoData.videoId,
+            title: videoData.title,
+            category: videoData.category
+        };
         
-        // Parse the JSON response
-        const analysis = JSON.parse(cleanedText);
-        
-        console.log('Gemini analysis:', analysis);
-        
-        // Update video metadata with analysis
-        videoData.isProductive = analysis.classification === "productive";
-        videoData.recommendedTime = analysis.recommendedTime;
-        videoData.analysisReason = analysis.reason;
-        videoData.potentialTransitions = analysis.potentialTransitions;
-        
-        return videoData;
     } catch (error) {
         console.error('Error analyzing with Gemini:', error);
         
-        // Fallback to basic category-based analysis
-        videoData.isProductive = isProductiveCategory(videoData.category);
-        videoData.recommendedTime = getCategoryDefaultTime(videoData.category);
-        videoData.analysisReason = "Based on video category (fallback analysis)";
-        videoData.potentialTransitions = [];
-        
-        return videoData;
+        // Return fallback data in case of error
+        return {
+            isProductive: false,
+            recommendedTime: 15,
+            analysisReason: "Error analyzing video content",
+            potentialTransitions: ["Education", "Science & Technology"],
+            videoId: videoData.videoId,
+            title: videoData.title,
+            category: videoData.category
+        };
     }
 }
 
@@ -682,24 +713,129 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
+// Replace your existing showTimeRecommendation function with this enhanced version
+
 function showTimeRecommendation(videoData, analysis) {
     const existingNotification = document.getElementById('wellbeing-time-recommendation');
     if (existingNotification) {
         existingNotification.remove();
     }
 
+    // Format transitions as HTML list
+    let transitionsHTML = '';
+    if (analysis.potentialTransitions && analysis.potentialTransitions.length > 0) {
+        transitionsHTML = '<ul>' + 
+            analysis.potentialTransitions.map(transition => `<li>${transition}</li>`).join('') + 
+            '</ul>';
+    }
+
+    // Create enhanced notification with all Gemini fields
     const notification = document.createElement('div');
     notification.id = 'wellbeing-time-recommendation';
     notification.innerHTML = `
-        <h3>${videoData.title}</h3>
-        <p>Category: ${videoData.category}</p>
-        <p>Recommended Time: ${analysis.recommendedTime} minutes</p>
+        <div class="wellbeing-header">
+            <h3>${videoData.title}</h3>
+            <button id="wellbeing-close-btn">×</button>
+        </div>
+        <div class="wellbeing-content">
+            <p><strong>Category:</strong> ${videoData.category}</p>
+            <p><strong>Classification:</strong> <span class="${analysis.classification.toLowerCase()}">${analysis.classification}</span></p>
+            <p><strong>Recommended Time:</strong> ${analysis.recommendedTime} minutes</p>
+            <div class="wellbeing-reason">
+                <p><strong>Reason:</strong></p>
+                <p>${analysis.reason}</p>
+            </div>
+            <div class="wellbeing-transitions">
+                <p><strong>Potential Transitions:</strong></p>
+                ${transitionsHTML}
+            </div>
+        </div>
     `;
+
+    // Add CSS styles for the notification
+    const style = document.createElement('style');
+    style.textContent = `
+        #wellbeing-time-recommendation {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            width: 320px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+            z-index: 9999;
+            font-family: 'Roboto', Arial, sans-serif;
+            overflow: hidden;
+        }
+        
+        .wellbeing-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            background-color: #cc0000;
+            color: white;
+        }
+        
+        .wellbeing-header h3 {
+            margin: 0;
+            font-size: 16px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 260px;
+        }
+        
+        #wellbeing-close-btn {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 22px;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+        }
+        
+        .wellbeing-content {
+            padding: 12px 16px;
+        }
+        
+        .wellbeing-content p {
+            margin: 8px 0;
+            font-size: 14px;
+        }
+        
+        .wellbeing-reason, .wellbeing-transitions {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #eee;
+        }
+        
+        .productive {
+            color: #388e3c;
+            font-weight: bold;
+        }
+        
+        .distracting {
+            color: #d32f2f;
+            font-weight: bold;
+        }
+        
+        .wellbeing-transitions ul {
+            margin: 8px 0;
+            padding-left: 20px;
+        }
+    `;
+    document.head.appendChild(style);
     document.body.appendChild(notification);
+    
+    // Add close button functionality
+    document.getElementById('wellbeing-close-btn').addEventListener('click', () => {
+        notification.remove();
+    });
 
-    console.log('UI Updated with:', videoData.title, videoData.category, analysis.recommendedTime);
+    console.log('UI Updated with complete analysis:', analysis);
 }
-
 function updateCurrentVideoSection(title, category) {
     // Find or create the "Current Video" section
     let currentVideoSection = document.getElementById('current-video-section');

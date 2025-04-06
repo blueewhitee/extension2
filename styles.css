@@ -119,19 +119,7 @@
         top: 60px;
     }
 }
-```
 
-You can create this file by right-clicking on your extension folder in Visual Studio Code, selecting "New File", and entering "styles.css" as the name. Then paste the CSS code above into the file.
-
-This CSS file provides styling for:
-1. The notification elements that appear when analyzing videos
-2. The floating timer display
-3. The category blocking overlay
-4. Proper styling for productive/distracting content labels
-5. Hover effects and responsive design for different screen sizes
-
-After creating this file, your extension should properly display all UI elements with the correct styling.// filepath: e:\minor_project_2\extension\styles.css
-/* Main notification styling */
 .wellbeing-notification {
     position: fixed;
     bottom: 20px;
@@ -216,6 +204,15 @@ After creating this file, your extension should properly display all UI elements
     color: #4CAF50;
     font-weight: bold;
 }
+.success {
+    color: #388e3c;
+    font-size: 13px;
+    background-color: #e8f5e9;
+    padding: 8px;
+    border-radius: 4px;
+    border-left: 4px solid #388e3c;
+    margin-top: 10px;
+}
 
 .wellbeing-distracting {
     color: #FF9800;
@@ -231,7 +228,19 @@ After creating this file, your extension should properly display all UI elements
     transform: scale(1.05);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
+.upload-status.success {
+    color: green;
+    font-weight: bold;
+}
 
+.upload-status.error {
+    color: red;
+}
+
+.upload-status.info {
+    color: #2196F3;
+    font-weight: bold;
+}
 /* Recommendation items in block overlay */
 #wellbeing-suggestions > div:hover {
     background-color: rgba(255, 255, 255, 0.2) !important;
