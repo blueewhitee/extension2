@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Digital draft1",
+  "version": "1.0",
+  "description": "A Chrome extension to help manage your YouTube viewing habits.",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://www.youtube.com/watch*",
+        "*://www.youtube.com/shorts*"
+      ],
+      "js": ["content.js"]
+    }
+  ],
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "scripting",
+    "alarms"
+   // "https://www.googleapis.com/youtube/v3/*"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://www.googleapis.com/*",
+    "https://www.googleapis.com/youtube/v3/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["videoCategories.json"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+} 
