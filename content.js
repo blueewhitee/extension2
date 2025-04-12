@@ -4,11 +4,16 @@ let CONFIG = {};
 let currentAnalysis = null;
 let isInitialized = false; // Flag to prevent multiple initializations
 let userAnalysisData = null; // Global variable for user analysis data
+let timerSettings = null; // Global variable for timer settings
+let timerState = null; // Global variable for current timer values (seconds)
+let timerInterval = null; // Interval ID for the timer loop
+const SAVE_INTERVAL_MS = 15000; // Save state every 15 seconds
+let lastSaveTime = 0;
 
 // Load configuration and user analysis data
 async function loadConfigAndProfile() {
     if (isInitialized) return;
-    console.log('Attempting to load config and user analysis data...');
+    console.log('Attempting to load config, profile, settings, and state...');
 
     // --- LOAD User Analysis Data ---
     try {
@@ -25,6 +30,47 @@ async function loadConfigAndProfile() {
         userAnalysisData = null;
     }
     // --- END Load User Analysis Data ---
+
+    // --- Load Timer Settings (from sync) ---
+    try {
+        const settingsResult = await chrome.storage.sync.get('timerSettings');
+        if (settingsResult.timerSettings) {
+            timerSettings = settingsResult.timerSettings;
+            console.log('Timer settings loaded successfully:', timerSettings);
+        } else {
+            console.log('No timer settings found in sync storage. Using defaults.');
+            timerSettings = {
+                distractingLimit: 30 * 60, // Default 30 mins
+                enableAutoblock: true,
+                redirectUrl: 'https://www.google.com',
+                hideRecommendations: true
+            };
+        }
+    } catch (error) {
+        console.error('Error loading timer settings:', error);
+        timerSettings = { distractingLimit: 30 * 60, enableAutoblock: true, redirectUrl: 'https://www.google.com', hideRecommendations: true };
+    }
+    // --- END Load Timer Settings ---
+
+    // --- Load Timer State (from local) ---
+    try {
+        const stateResult = await chrome.storage.local.get('timerState');
+        if (stateResult.timerState) {
+            timerState = stateResult.timerState;
+            console.log('Timer state loaded successfully:', timerState);
+        } else {
+            console.log('No timer state found in local storage. Initializing.');
+            timerState = {
+                distracting: timerSettings.distractingLimit,
+                lastUpdated: Date.now()
+            };
+            await chrome.storage.local.set({ timerState: timerState });
+        }
+    } catch (error) {
+        console.error('Error loading timer state:', error);
+        timerState = { distracting: timerSettings.distractingLimit, lastUpdated: Date.now() };
+    }
+    // --- END Load Timer State ---
 
     // Load config (existing logic)
     try {
@@ -254,8 +300,11 @@ function initializeExtension() {
             isInitialized = true;
             console.log('Extension initialization complete.');
 
-            console.log("Attempting to create floating timer..."); // Added log
-            createOrUpdateFloatingTimer();
+            console.log("Attempting to create/update floating timer...");
+            createOrUpdateFloatingTimer(); // Update UI with loaded state
+
+            console.log("Starting timer loop..."); // Added log
+            startTimerLoop(); // Start the main timer loop
         });
 }
 
@@ -304,8 +353,146 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         sendResponse({ success: true });
         return true;
+    } else if (message.type === 'SETTINGS_UPDATED') {
+        console.log('Received SETTINGS_UPDATED message. Reloading timer settings...');
+        chrome.storage.sync.get('timerSettings', (result) => {
+            if (chrome.runtime.lastError) {
+                console.error("Error reloading timer settings:", chrome.runtime.lastError);
+                return;
+            }
+            if (result.timerSettings) {
+                const oldLimit = timerSettings?.distractingLimit;
+                timerSettings = result.timerSettings;
+                console.log('Timer settings reloaded:', timerSettings);
+
+                if (timerState && oldLimit !== timerSettings.distractingLimit) {
+                    console.log("Distracting limit changed. Resetting timer.");
+                    timerState.distracting = timerSettings.distractingLimit;
+                    updateFloatingTimerUI();
+                    saveTimerState(true);
+                }
+            } else {
+                console.log('Timer settings not found after update message.');
+            }
+        });
+        sendResponse({ success: true });
+        return true;
     }
 });
+
+// --- NEW Timer Loop Function ---
+function startTimerLoop() {
+    if (timerInterval) {
+        clearInterval(timerInterval);
+    }
+
+    timerInterval = setInterval(() => {
+        if (!timerState || !timerSettings) return;
+
+        const videoElement = document.querySelector('video');
+        const isPlaying = videoElement && !videoElement.paused && !document.hidden;
+        let timeDecremented = false;
+
+        if (isPlaying && currentAnalysis) {
+            if (!currentAnalysis.isProductive) {
+                if (timerState.distracting > 0) {
+                    timerState.distracting--;
+                    timeDecremented = true;
+                    if (timerState.distracting === 0) {
+                        console.log("Distracting time limit reached!");
+                        if (timerSettings.enableAutoblock) {
+                            console.log("Autoblock enabled. Redirecting to:", timerSettings.redirectUrl);
+                            window.location.href = timerSettings.redirectUrl;
+                            clearInterval(timerInterval);
+                            timerInterval = null;
+                        } else {
+                            console.log("Autoblock disabled. Limit reached notification needed.");
+                        }
+                    }
+                }
+            }
+        }
+
+        if (timeDecremented) {
+            updateFloatingTimerUI();
+        }
+
+        const now = Date.now();
+        if (now - lastSaveTime > SAVE_INTERVAL_MS) {
+            saveTimerState();
+        }
+
+    }, 1000);
+}
+
+// --- NEW Function to Update Floating Timer UI ---
+function updateFloatingTimerUI() {
+    if (!timerState) return;
+
+    const doomValueElement = document.getElementById('timer-doomscrolling-value');
+
+    if (doomValueElement) {
+        doomValueElement.textContent = formatTime(timerState.distracting);
+        const limit = timerSettings?.distractingLimit || 1;
+        const percentage = (timerState.distracting / limit) * 100;
+        const parentItem = doomValueElement.closest('.wellbeing-timer-item');
+        if (parentItem) {
+            parentItem.classList.remove('warning', 'low');
+            if (percentage < 10) {
+                parentItem.classList.add('low');
+            } else if (percentage < 30) {
+                parentItem.classList.add('warning');
+            }
+        }
+    }
+}
+
+// --- NEW Function to Save Timer State ---
+async function saveTimerState(force = false) {
+    if (!timerState) return;
+    if (!force && Date.now() - lastSaveTime <= SAVE_INTERVAL_MS) return;
+
+    try {
+        timerState.lastUpdated = Date.now();
+        await chrome.storage.local.set({ timerState: timerState });
+        lastSaveTime = Date.now();
+    } catch (error) {
+        console.error("Error saving timer state:", error);
+    }
+}
+
+// --- Modify createOrUpdateFloatingTimer to use loaded state ---
+function createOrUpdateFloatingTimer() {
+    console.log(">>> createOrUpdateFloatingTimer function started.");
+    try {
+        let timerDiv = document.getElementById('wellbeing-floating-timer');
+        if (!timerDiv) {
+            console.log("Timer div not found, creating new one.");
+            timerDiv = document.createElement('div');
+            timerDiv.id = 'wellbeing-floating-timer';
+            timerDiv.className = 'wellbeing-timer-display';
+            document.body.appendChild(timerDiv);
+            console.log("Timer div appended to body.");
+        } else {
+            console.log("Timer div already exists, updating content.");
+        }
+
+        const distractingTime = timerState?.distracting ?? timerSettings?.distractingLimit ?? (30 * 60);
+
+        timerDiv.innerHTML = `
+            <div class="wellbeing-timer-title">Time Limits</div>
+            <div class="wellbeing-timer-item">
+                <span class="wellbeing-timer-category">Doomscrolling</span>
+                <span class="wellbeing-timer-time" id="timer-doomscrolling-value">${formatTime(distractingTime)}</span>
+            </div>
+        `;
+        console.log("Timer div innerHTML updated with initial values.");
+        updateFloatingTimerUI();
+
+    } catch (error) {
+        console.error("Error in createOrUpdateFloatingTimer:", error);
+    }
+}
 
 // Helper Functions
 function getVideoIdFromUrl(url) {
@@ -351,10 +538,8 @@ function parseDuration(durationString) {
 
 async function sendToGeminiAPI(videoData) {
     console.log("Attempting to send data to Gemini API for analysis:", videoData);
-    // Access the loaded userAnalysisData
     console.log("Using user analysis data for context:", userAnalysisData);
 
-    // 1. Get API Key (existing logic)
     return new Promise((resolve, reject) => {
         chrome.storage.sync.get(['geminiApiKey'], async (result) => {
             const apiKey = result.geminiApiKey || CONFIG.GEMINI_API_KEY;
@@ -373,59 +558,50 @@ async function sendToGeminiAPI(videoData) {
             }
 
             const apiEndpoint = `${CONFIG.API_ENDPOINT}?key=${apiKey}`;
-            const systemPrompt = CONFIG.SYSTEM_PROMPT; // Keep the base system prompt
+            const systemPrompt = CONFIG.SYSTEM_PROMPT;
 
-            // 2. Construct Request Body - Incorporate User Analysis Data Context
             let personalizationContext = "";
             if (userAnalysisData) {
                 personalizationContext = "\n\nUser's Historical Viewing Context (for personalization):";
 
-                // Dominant Topics
                 if (userAnalysisData.dominantTopics && userAnalysisData.dominantTopics.length > 0) {
                     const topics = userAnalysisData.dominantTopics.slice(0, 5).map(t => `${t.name} (${t.percentage.toFixed(1)}%)`).join(', ');
                     personalizationContext += `\n- Frequently Watched Topics: ${topics}`;
                 }
 
-                // Format Preference
                 if (userAnalysisData.formatDistribution) {
                     personalizationContext += `\n- Viewing Format: ${userAnalysisData.formatDistribution.shortForm}% Short-form, ${userAnalysisData.formatDistribution.longForm}% Long-form`;
                 }
 
-                // Psychological Patterns (Summarize titles)
                 if (userAnalysisData.psychologicalPatterns && userAnalysisData.psychologicalPatterns.length > 0) {
                     const patterns = userAnalysisData.psychologicalPatterns.slice(0, 3).map(p => p.title).join('; ');
                     personalizationContext += `\n- Observed Patterns: ${patterns}`;
                 }
 
-                // Key Insights / Suggested Limits (if available)
                 if (userAnalysisData.keyInsights?.algorithmicInsight) {
-                     // Extract suggested limits if present in the insight text
-                     const limitsMatch = userAnalysisData.keyInsights.algorithmicInsight.match(/Recommended daily viewing time limits:(.*)/i);
-                     if (limitsMatch && limitsMatch[1]) {
-                         personalizationContext += `\n- Previously Suggested Limits: ${limitsMatch[1].trim()}`;
-                     }
+                    const limitsMatch = userAnalysisData.keyInsights.algorithmicInsight.match(/Recommended daily viewing time limits:(.*)/i);
+                    if (limitsMatch && limitsMatch[1]) {
+                        personalizationContext += `\n- Previously Suggested Limits: ${limitsMatch[1].trim()}`;
+                    }
                 }
 
-                // Category Transitions (Maybe mention top 1-2 transitions)
                 if (userAnalysisData.categoryTransitions && userAnalysisData.categoryTransitions.length > 0) {
                     const topTransition = userAnalysisData.categoryTransitions[0];
                     personalizationContext += `\n- Common Transition: From '${topTransition.from}' to '${topTransition.to}' (Strength: ${topTransition.strength})`;
                 }
             } else {
-                 personalizationContext = "\n\n(No historical user analysis data available for personalization)";
+                personalizationContext = "\n\n(No historical user analysis data available for personalization)";
             }
 
-            // Combine video details with personalization context for the user prompt
-            const userPrompt = `Analyze the following YouTube video:\nTitle: ${videoData.title}\nChannel: ${videoData.channelTitle}\nCategory: ${videoData.category}\nDuration: ${videoData.duration} seconds\nViews: ${videoData.views}\nLikes: ${videoData.likes}\nPublished: ${videoData.publishedAt}\nIs Short: ${videoData.isShort}${personalizationContext}`; // <<< Append personalization context
+            const userPrompt = `Analyze the following YouTube video:\nTitle: ${videoData.title}\nChannel: ${videoData.channelTitle}\nCategory: ${videoData.category}\nDuration: ${videoData.duration} seconds\nViews: ${videoData.views}\nLikes: ${videoData.likes}\nPublished: ${videoData.publishedAt}\nIs Short: ${videoData.isShort}${personalizationContext}`;
 
             const requestBody = {
                 contents: [{
-                    parts: [{ text: systemPrompt }, { text: userPrompt }] // System prompt first, then user prompt with context
+                    parts: [{ text: systemPrompt }, { text: userPrompt }]
                 }],
             };
 
             console.log("Sending request to Gemini:", apiEndpoint);
-            // console.log("Request Body:", JSON.stringify(requestBody, null, 2)); // Pretty print for debugging
 
             try {
                 const response = await fetch(apiEndpoint, {
@@ -674,41 +850,6 @@ function showTimeRecommendation(videoData, analysis) {
 
 function debugLog(...args) {
     console.log('[YouTube Wellbeing]', ...args);
-}
-
-function createOrUpdateFloatingTimer() {
-    console.log(">>> createOrUpdateFloatingTimer function started."); // Added log
-    try {
-        let timerDiv = document.getElementById('wellbeing-floating-timer');
-        if (!timerDiv) {
-            console.log("Timer div not found, creating new one."); // Added log
-            timerDiv = document.createElement('div');
-            timerDiv.id = 'wellbeing-floating-timer';
-            timerDiv.className = 'wellbeing-timer-display';
-            document.body.appendChild(timerDiv);
-            console.log("Timer div appended to body."); // Added log
-        } else {
-            console.log("Timer div already exists, updating content."); // Added log
-        }
-
-        const doomscrollingTime = 30 * 60;
-        const gamingTime = 15 * 60;
-
-        timerDiv.innerHTML = `
-            <div class="wellbeing-timer-title">Time Limits</div>
-            <div class="wellbeing-timer-item">
-                <span class="wellbeing-timer-category">Doomscrolling</span>
-                <span class="wellbeing-timer-time" id="timer-doomscrolling-value">${formatTime(doomscrollingTime)}</span>
-            </div>
-            <div class="wellbeing-timer-item">
-                <span class="wellbeing-timer-category">Gaming</span>
-                <span class="wellbeing-timer-time" id="timer-gaming-value">${formatTime(gamingTime)}</span>
-            </div>
-        `;
-        console.log("Timer div innerHTML updated."); // Added log
-    } catch (error) {
-        console.error("Error in createOrUpdateFloatingTimer:", error);
-    }
 }
 
 function formatTime(seconds) {

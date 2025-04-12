@@ -42,25 +42,31 @@ function formatTime(seconds) {
 }
 // --- End formatTime definition ---
 
+// --- Modify updateTimerDisplay to fetch from storage ---
 function updateTimerDisplay() {
-    // --- Check if elements exist before updating ---
-    const doomscrollingTimerElement = document.getElementById('doomscrolling-timer');
-    // Assuming you might add a gaming timer element later with id 'gaming-timer'
-    // const gamingTimerElement = document.getElementById('gaming-timer');
+    chrome.storage.local.get('timerState', (result) => { // Get state from local storage
+        const state = result.timerState;
+        const distractingTime = state?.distracting ?? (30 * 60); // Default if not found
 
-    if (doomscrollingTimerElement) {
-        // Use the correct variable name if 'entertainmentTimer' is meant for doomscrolling
-        doomscrollingTimerElement.textContent = formatTime(entertainmentTimer);
-        // Update progress bar (assuming 30 mins = 1800 seconds is the max)
+        const doomscrollingTimerElement = document.getElementById('doomscrolling-timer');
         const doomscrollingProgress = document.getElementById('doomscrolling-progress');
-        if (doomscrollingProgress) {
-            doomscrollingProgress.value = (entertainmentTimer / (30 * 60)) * 100;
+
+        if (doomscrollingTimerElement) {
+            doomscrollingTimerElement.textContent = formatTime(distractingTime);
         }
-    }
-    // if (gamingTimerElement) {
-    //     gamingTimerElement.textContent = formatTime(gamingTimer);
-    // }
-    // --- End element check ---
+
+        // Update progress bar based on settings limit
+        chrome.storage.sync.get('timerSettings', (settingsResult) => {
+            const settings = settingsResult.timerSettings;
+            const limit = settings?.distractingLimit || (30 * 60); // Default limit
+            if (doomscrollingProgress && limit > 0) {
+                 const progressValue = Math.max(0, (distractingTime / limit) * 100);
+                 doomscrollingProgress.value = progressValue;
+            } else if (doomscrollingProgress) {
+                 doomscrollingProgress.value = 100; // Default if limit is 0 or invalid
+            }
+        });
+    });
 }
 
 chrome.storage.sync.set({
@@ -273,11 +279,31 @@ function initializePopup() {
     if (dataTabButton) dataTabButton.addEventListener('click', (e) => openTab(e, 'DataTab'));
     if (settingsTabButton) settingsTabButton.addEventListener('click', (e) => openTab(e, 'SettingsTab'));
 
-    // Get current timers from storage or background script (placeholder update)
-    updateTimerDisplay(); // Initial display
+    // --- Load and display current settings ---
+    chrome.storage.sync.get('timerSettings', (result) => {
+        if (result.timerSettings) {
+            const settings = result.timerSettings;
+            const doomLimitInput = document.getElementById('doomscrolling-limit');
+            const redirectUrlInput = document.getElementById('redirect-url');
+            const autoBlockInput = document.getElementById('enable-autoblock');
+            const hideRecsInput = document.getElementById('hide-recommendations');
+
+            if (doomLimitInput) doomLimitInput.value = (settings.distractingLimit / 60) || 30; // Convert back to minutes
+            if (redirectUrlInput) redirectUrlInput.value = settings.redirectUrl || 'https://www.google.com';
+            if (autoBlockInput) autoBlockInput.checked = settings.enableAutoblock ?? true;
+            if (hideRecsInput) hideRecsInput.checked = settings.hideRecommendations ?? true;
+        } else {
+            console.log("No timer settings found in sync storage, using defaults.");
+            // Keep default values in HTML
+        }
+    });
+    // --- End load settings ---
+
+    // Get current timers from storage (will be updated by content script)
+    updateTimerDisplay(); // Initial display (will show defaults or last known)
 
     // Get current video info from content script
-    getCurrentVideoInfo(); // Request info from content script
+    getCurrentVideoInfo();
 
     // Add export functionality
     const exportButton = document.getElementById('exportDataButton');
@@ -288,11 +314,11 @@ function initializePopup() {
     // Add settings functionality
     const saveSettingsButton = document.getElementById('saveSettingsButton');
     if (saveSettingsButton) {
-        saveSettingsButton.addEventListener('click', saveSettings); // Ensure function exists
+        saveSettingsButton.addEventListener('click', saveSettings);
     }
 
-    // Update timer display periodically - This needs real data source
-    setInterval(updateTimerDisplay, 1000); // Placeholder update interval
+    // Update timer display periodically by fetching from storage
+    setInterval(updateTimerDisplay, 1000); // Update display every second
 }
 
 // Make sure you have the openTab function defined
@@ -384,27 +410,44 @@ function exportAnalyticsData() {
 }
 
 function saveSettings() {
-    console.log("Save Settings button clicked - Functionality not implemented yet.");
-    // Add logic here to retrieve settings from inputs and save to chrome.storage
-    const doomLimit = document.getElementById('doomscrolling-limit')?.value;
-    const redirectUrl = document.getElementById('redirect-url')?.value;
-    const autoBlock = document.getElementById('enable-autoblock')?.checked;
-    const hideRecs = document.getElementById('hide-recommendations')?.checked;
+    console.log("Save Settings button clicked."); // Updated log
+    const doomLimitInput = document.getElementById('doomscrolling-limit');
+    const redirectUrlInput = document.getElementById('redirect-url');
+    const autoBlockInput = document.getElementById('enable-autoblock');
+    const hideRecsInput = document.getElementById('hide-recommendations'); // Keep this if used elsewhere
 
-    const settings = {
-        doomscrollingLimit: parseInt(doomLimit) || 30,
-        redirectUrl: redirectUrl || 'https://www.google.com',
-        enableAutoblock: autoBlock !== undefined ? autoBlock : true,
-        hideRecommendations: hideRecs !== undefined ? hideRecs : true
+    // Validate inputs
+    const doomLimitMinutes = parseInt(doomLimitInput?.value) || 30;
+    const redirectUrlValue = redirectUrlInput?.value || 'https://www.google.com';
+    const autoBlockValue = autoBlockInput?.checked ?? true; // Default to true if element not found
+    const hideRecsValue = hideRecsInput?.checked ?? true;
+
+    // Convert limit to seconds
+    const doomLimitSeconds = doomLimitMinutes * 60;
+
+    const timerSettings = { // Use a specific key for timer-related settings
+        distractingLimit: doomLimitSeconds, // Store as 'distractingLimit' in seconds
+        // Add other limits here if needed (e.g., productiveLimit)
+        enableAutoblock: autoBlockValue,
+        redirectUrl: redirectUrlValue,
+        hideRecommendations: hideRecsValue // Keep for potential future use
     };
 
-    chrome.storage.sync.set({ settings: settings }, () => {
+    // Use chrome.storage.sync for settings so they sync across devices
+    chrome.storage.sync.set({ timerSettings: timerSettings }, () => {
         if (chrome.runtime.lastError) {
-            console.error("Error saving settings:", chrome.runtime.lastError);
+            console.error("Error saving timer settings:", chrome.runtime.lastError);
             alert("Error saving settings.");
         } else {
-            console.log("Settings saved:", settings);
+            console.log("Timer settings saved:", timerSettings);
             alert("Settings saved successfully!");
+
+            // Notify content script about the settings update
+            chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+                if (tabs && tabs.length > 0 && tabs[0].id) {
+                    chrome.tabs.sendMessage(tabs[0].id, { type: "SETTINGS_UPDATED" });
+                }
+            });
         }
     });
 }
