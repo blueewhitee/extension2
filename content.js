@@ -3,30 +3,47 @@ let videoCategories = { categories: {} };
 let CONFIG = {};
 let currentAnalysis = null;
 let isInitialized = false; // Flag to prevent multiple initializations
+let userAnalysisData = null; // Global variable for user analysis data
 
-// Load configuration using dynamic import
-async function loadConfig() {
-    // Prevent re-running if already initialized via another path
+// Load configuration and user analysis data
+async function loadConfigAndProfile() {
     if (isInitialized) return;
-    console.log('Attempting to load config...'); // Added log
+    console.log('Attempting to load config and user analysis data...');
+
+    // --- LOAD User Analysis Data ---
     try {
-        // Use dynamic import for the .js file
+        const result = await chrome.storage.local.get('userAnalysisData');
+        if (result.userAnalysisData) {
+            userAnalysisData = result.userAnalysisData;
+            console.log('User analysis data loaded successfully:', userAnalysisData);
+        } else {
+            console.log('No user analysis data found in storage.');
+            userAnalysisData = null;
+        }
+    } catch (error) {
+        console.error('Error loading user analysis data:', error);
+        userAnalysisData = null;
+    }
+    // --- END Load User Analysis Data ---
+
+    // Load config (existing logic)
+    try {
+        console.log('Attempting to load config...'); // Added log
         const configModule = await import(chrome.runtime.getURL('config.js'));
         CONFIG = configModule.CONFIG; // Access the exported CONFIG object
         console.log('Config loaded successfully:', CONFIG);
     } catch (error) {
         console.error('Error loading config:', error);
-        // Fallback config remains the same
         CONFIG = {
-            YOUTUBE_API_KEY: 'YOUR_YOUTUBE_API_KEY_FALLBACK', // Use distinct fallback keys
+            YOUTUBE_API_KEY: 'YOUR_YOUTUBE_API_KEY_FALLBACK',
             GEMINI_API_KEY: 'YOUR_GEMINI_API_KEY_FALLBACK',
             API_ENDPOINT: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent',
             SYSTEM_PROMPT: 'Analyze YouTube video content for productivity.'
         };
         console.log('Using fallback config.');
     }
-    // After config is loaded (or fallback used), proceed to initialize
-    // Ensure initializeExtension is called only once after config is ready
+
+    // Proceed to initialize extension
     if (!isInitialized) {
         initializeExtension();
     }
@@ -47,31 +64,28 @@ function setupVideoChangeDetection() {
         const currentUrl = window.location.href;
         let currentVideoId = getVideoIdFromUrl(currentUrl);
 
-        // Only process if we have a video ID and it's changed or URL changed significantly
         if (currentVideoId && (currentVideoId !== lastVideoId || currentUrl !== lastUrl)) {
             console.log('Video or URL changed, analyzing metadata for:', currentVideoId);
             lastVideoId = currentVideoId;
             lastUrl = currentUrl;
 
-            // Check if the video data is already in cache
             if (videoDataCache.has(currentVideoId)) {
                 console.log('Using cached data for video:', currentVideoId);
                 const cachedData = videoDataCache.get(currentVideoId);
-                processVideoData(cachedData); // Process cached data
-                analyzeAndShowRecommendation(cachedData); // Show recommendation from cache
+                processVideoData(cachedData);
+                analyzeAndShowRecommendation(cachedData);
                 return;
             }
 
-            // Throttle API calls
             const now = Date.now();
             if (now - lastApiCallTime >= API_THROTTLE_MS) {
                 console.log('Making API call for video:', currentVideoId);
                 lastApiCallTime = now;
-                fetchVideoData(currentVideoId); // Fetch new data via API
+                fetchVideoData(currentVideoId);
             } else {
                 console.log(`Throttling API call, using DOM data for:`, currentVideoId);
                 const basicInfo = getVideoInfoFromDOM();
-                processBasicVideoData(currentVideoId, basicInfo); // Process basic DOM data
+                processBasicVideoData(currentVideoId, basicInfo);
                 showTimeRecommendation(
                     { videoId: currentVideoId, title: basicInfo.title, category: basicInfo.category },
                     { isProductive: false, recommendedTime: 15, reason: "Throttled - basic info only", potentialTransitions: [], personalizedAdvice: "Full analysis pending." }
@@ -80,15 +94,12 @@ function setupVideoChangeDetection() {
         }
     }
 
-    // Use specific YouTube navigation events
     window.addEventListener('yt-navigate-finish', checkForVideoChange);
     window.addEventListener('yt-page-data-updated', checkForVideoChange);
 
-    // Initial check after a short delay for page elements to load
     console.log("Scheduling initial video check..."); // Added log
-    setTimeout(checkForVideoChange, 2000); // Slightly longer delay
+    setTimeout(checkForVideoChange, 2000);
 
-    // Return a cleanup function to remove listeners when the script unloads
     return () => {
         window.removeEventListener('yt-navigate-finish', checkForVideoChange);
         window.removeEventListener('yt-page-data-updated', checkForVideoChange);
@@ -100,7 +111,6 @@ function setupVideoChangeDetection() {
 async function analyzeAndShowRecommendation(videoData) {
     if (!videoData || !videoData.videoId) return;
     try {
-        // Check if analysis already exists in cache or currentAnalysis
         if (videoData.isProductive !== undefined) {
             console.log('Using existing analysis for recommendation:', videoData.videoId);
             showTimeRecommendation(videoData, {
@@ -111,24 +121,19 @@ async function analyzeAndShowRecommendation(videoData) {
                 personalizedAdvice: videoData.personalizedAdvice,
                 confidenceScore: videoData.confidenceScore
             });
-            currentAnalysis = { ...videoData }; // Update currentAnalysis
+            currentAnalysis = { ...videoData };
             return;
         }
 
-        // If no analysis exists, call Gemini
         console.log('Requesting new Gemini analysis for:', videoData.videoId);
         const analysis = await sendToGeminiAPI(videoData);
 
-        // Combine video data with analysis results
         const enhancedData = { ...videoData, ...analysis };
 
-        // Update cache with analysis results
         videoDataCache.set(videoData.videoId, enhancedData);
 
-        // Update UI
         showTimeRecommendation(enhancedData, analysis);
 
-        // Save current analysis
         currentAnalysis = {
             isProductive: analysis.isProductive,
             category: videoData.category,
@@ -137,10 +142,9 @@ async function analyzeAndShowRecommendation(videoData) {
             potentialTransitions: analysis.potentialTransitions,
             personalizedAdvice: analysis.personalizedAdvice,
             confidenceScore: analysis.confidenceScore,
-            videoId: videoData.videoId // Ensure videoId is part of currentAnalysis
+            videoId: videoData.videoId
         };
 
-        // Send updated data to popup/background if needed
         chrome.runtime.sendMessage({
             type: 'VIDEO_INFO_ENHANCED',
             data: enhancedData
@@ -157,14 +161,14 @@ async function fetchVideoData(videoId) {
         if (videoDataCache.has(videoId)) {
             console.log('fetchVideoData: Using cached data for', videoId);
             const cachedData = videoDataCache.get(videoId);
-            processVideoData(cachedData); // Process immediately
-            analyzeAndShowRecommendation(cachedData); // Trigger analysis/recommendation
+            processVideoData(cachedData);
+            analyzeAndShowRecommendation(cachedData);
         }
         return;
     }
     if (!chrome.runtime?.id) { return; }
     chrome.storage.sync.get(['youtubeApiKey'], (result) => {
-        const apiKey = result.youtubeApiKey || CONFIG.YOUTUBE_API_KEY; // Use config fallback
+        const apiKey = result.youtubeApiKey || CONFIG.YOUTUBE_API_KEY;
         if (!apiKey) { return; }
 
         console.log('Fetching YouTube API data for video ID:', videoId);
@@ -219,9 +223,8 @@ async function fetchVideoData(videoId) {
 
 // Main initialization function - called AFTER config is loaded
 function initializeExtension() {
-    // Prevent re-initialization if already done
     if (isInitialized) {
-        console.log('Extension already initialized, skipping setup.'); // Added log
+        console.log('Extension already initialized, skipping setup.');
         return;
     }
     if (!chrome.runtime?.id) {
@@ -231,7 +234,6 @@ function initializeExtension() {
 
     console.log('Initializing extension core logic...');
 
-    // Load categories, then set up detection
     fetch(chrome.runtime.getURL('videoCategories.json'))
         .then(response => {
             if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
@@ -243,43 +245,38 @@ function initializeExtension() {
         })
         .catch(error => {
             console.error('Error loading categories:', error);
-            videoCategories = { categories: {} }; // Fallback
+            videoCategories = { categories: {} };
             console.log('Using fallback categories.');
         })
         .finally(() => {
-            // Setup detection AFTER categories attempt (success or fail)
             console.log("Setting up detection after category load attempt."); // Added log
             const cleanup = setupVideoChangeDetection();
-            isInitialized = true; // Mark as initialized
+            isInitialized = true;
             console.log('Extension initialization complete.');
 
-            // Add call to create/update the persistent UI here
             console.log("Attempting to create floating timer..."); // Added log
             createOrUpdateFloatingTimer();
         });
 }
 
-// Use DOMContentLoaded to trigger the initial config load reliably
+// Use DOMContentLoaded to trigger the combined load function
 if (document.readyState === 'loading') {
-    console.log("DOM not ready, adding listener for DOMContentLoaded."); // Added log
-    document.addEventListener('DOMContentLoaded', loadConfig);
+    document.addEventListener('DOMContentLoaded', loadConfigAndProfile);
 } else {
-    // If DOM is already loaded, call loadConfig directly
-    console.log("DOM already ready, calling loadConfig directly."); // Added log
-    loadConfig();
+    loadConfigAndProfile();
 }
 
-// Listener for re-initialization messages
+// Listener for messages (including profile updates)
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'REINITIALIZE') {
-        console.log('Received REINITIALIZE message. Resetting and reloading config.'); // Added log
-        isInitialized = false; // Reset flag
-        loadConfig(); // Reload config and re-initialize
+        console.log('Received REINITIALIZE message. Resetting and reloading config.');
+        isInitialized = false;
+        loadConfigAndProfile();
         sendResponse({ success: true });
-        return true; // Indicate async response potentially needed later
+        return true;
     } else if (message.type === 'GET_CURRENT_ANALYSIS') {
         sendResponse(currentAnalysis);
-        return true; // Indicates asynchronous response
+        return true;
     } else if (message.action === 'getCurrentVideoInfo') {
         console.log("Popup requested current video info.");
         const videoId = getVideoIdFromUrl(window.location.href);
@@ -289,7 +286,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         console.log("Sending to popup:", responseData);
         sendResponse(responseData);
-        return true; // Indicate async response
+        return true;
+    } else if (message.type === 'PROFILE_UPDATED') {
+        console.log('Received PROFILE_UPDATED message. Reloading user analysis data...');
+        chrome.storage.local.get('userAnalysisData', (result) => {
+            if (chrome.runtime.lastError) {
+                console.error("Error reloading user analysis data:", chrome.runtime.lastError);
+                return;
+            }
+            if (result.userAnalysisData) {
+                userAnalysisData = result.userAnalysisData;
+                console.log('User analysis data reloaded:', userAnalysisData);
+            } else {
+                userAnalysisData = null;
+                console.log('User analysis data removed or not found after update.');
+            }
+        });
+        sendResponse({ success: true });
+        return true;
     }
 });
 
@@ -337,16 +351,16 @@ function parseDuration(durationString) {
 
 async function sendToGeminiAPI(videoData) {
     console.log("Attempting to send data to Gemini API for analysis:", videoData);
+    // Access the loaded userAnalysisData
+    console.log("Using user analysis data for context:", userAnalysisData);
 
-    // 1. Get API Key
+    // 1. Get API Key (existing logic)
     return new Promise((resolve, reject) => {
         chrome.storage.sync.get(['geminiApiKey'], async (result) => {
-            const apiKey = result.geminiApiKey || CONFIG.GEMINI_API_KEY; // Use config fallback
+            const apiKey = result.geminiApiKey || CONFIG.GEMINI_API_KEY;
 
             if (!apiKey || apiKey === 'YOUR_GEMINI_API_KEY_FALLBACK') {
                 console.error('Valid Gemini API Key not found. Cannot perform analysis.');
-                // Resolve with a default error analysis instead of rejecting,
-                // so the UI can still show something.
                 resolve({
                     isProductive: false,
                     recommendedTime: 15,
@@ -359,19 +373,59 @@ async function sendToGeminiAPI(videoData) {
             }
 
             const apiEndpoint = `${CONFIG.API_ENDPOINT}?key=${apiKey}`;
-            const systemPrompt = CONFIG.SYSTEM_PROMPT;
+            const systemPrompt = CONFIG.SYSTEM_PROMPT; // Keep the base system prompt
 
-            // 2. Construct Request Body
-            // Prepare the user prompt part with video details
-            const userPrompt = `Analyze the following YouTube video:\nTitle: ${videoData.title}\nChannel: ${videoData.channelTitle}\nCategory: ${videoData.category}\nDuration: ${videoData.duration} seconds\nViews: ${videoData.views}\nLikes: ${videoData.likes}\nPublished: ${videoData.publishedAt}\nIs Short: ${videoData.isShort}`;
+            // 2. Construct Request Body - Incorporate User Analysis Data Context
+            let personalizationContext = "";
+            if (userAnalysisData) {
+                personalizationContext = "\n\nUser's Historical Viewing Context (for personalization):";
+
+                // Dominant Topics
+                if (userAnalysisData.dominantTopics && userAnalysisData.dominantTopics.length > 0) {
+                    const topics = userAnalysisData.dominantTopics.slice(0, 5).map(t => `${t.name} (${t.percentage.toFixed(1)}%)`).join(', ');
+                    personalizationContext += `\n- Frequently Watched Topics: ${topics}`;
+                }
+
+                // Format Preference
+                if (userAnalysisData.formatDistribution) {
+                    personalizationContext += `\n- Viewing Format: ${userAnalysisData.formatDistribution.shortForm}% Short-form, ${userAnalysisData.formatDistribution.longForm}% Long-form`;
+                }
+
+                // Psychological Patterns (Summarize titles)
+                if (userAnalysisData.psychologicalPatterns && userAnalysisData.psychologicalPatterns.length > 0) {
+                    const patterns = userAnalysisData.psychologicalPatterns.slice(0, 3).map(p => p.title).join('; ');
+                    personalizationContext += `\n- Observed Patterns: ${patterns}`;
+                }
+
+                // Key Insights / Suggested Limits (if available)
+                if (userAnalysisData.keyInsights?.algorithmicInsight) {
+                     // Extract suggested limits if present in the insight text
+                     const limitsMatch = userAnalysisData.keyInsights.algorithmicInsight.match(/Recommended daily viewing time limits:(.*)/i);
+                     if (limitsMatch && limitsMatch[1]) {
+                         personalizationContext += `\n- Previously Suggested Limits: ${limitsMatch[1].trim()}`;
+                     }
+                }
+
+                // Category Transitions (Maybe mention top 1-2 transitions)
+                if (userAnalysisData.categoryTransitions && userAnalysisData.categoryTransitions.length > 0) {
+                    const topTransition = userAnalysisData.categoryTransitions[0];
+                    personalizationContext += `\n- Common Transition: From '${topTransition.from}' to '${topTransition.to}' (Strength: ${topTransition.strength})`;
+                }
+            } else {
+                 personalizationContext = "\n\n(No historical user analysis data available for personalization)";
+            }
+
+            // Combine video details with personalization context for the user prompt
+            const userPrompt = `Analyze the following YouTube video:\nTitle: ${videoData.title}\nChannel: ${videoData.channelTitle}\nCategory: ${videoData.category}\nDuration: ${videoData.duration} seconds\nViews: ${videoData.views}\nLikes: ${videoData.likes}\nPublished: ${videoData.publishedAt}\nIs Short: ${videoData.isShort}${personalizationContext}`; // <<< Append personalization context
 
             const requestBody = {
                 contents: [{
-                    parts: [{ text: systemPrompt }, { text: userPrompt }]
+                    parts: [{ text: systemPrompt }, { text: userPrompt }] // System prompt first, then user prompt with context
                 }],
             };
 
             console.log("Sending request to Gemini:", apiEndpoint);
+            // console.log("Request Body:", JSON.stringify(requestBody, null, 2)); // Pretty print for debugging
 
             try {
                 const response = await fetch(apiEndpoint, {
@@ -392,9 +446,9 @@ async function sendToGeminiAPI(videoData) {
                 console.log("Gemini API Response:", responseData);
 
                 if (!responseData.candidates || !responseData.candidates[0] || !responseData.candidates[0].content || !responseData.candidates[0].content.parts || !responseData.candidates[0].content.parts[0]) {
-                     console.error("Unexpected Gemini response structure:", responseData);
-                     throw new Error("Unexpected response structure from Gemini API.");
-                 }
+                    console.error("Unexpected Gemini response structure:", responseData);
+                    throw new Error("Unexpected response structure from Gemini API.");
+                }
 
                 const generatedText = responseData.candidates[0].content.parts[0].text;
                 console.log("Generated Text from Gemini:", generatedText);
@@ -406,14 +460,14 @@ async function sendToGeminiAPI(videoData) {
                 } catch (parseError) {
                     console.error("Failed to parse JSON response from Gemini:", parseError, "Raw text:", generatedText);
                     analysisResult = {
-                         isProductive: generatedText.toLowerCase().includes('"productive"'),
-                         recommendedTime: parseInt(generatedText.match(/"recommendedTime":\s*(\d+)/)?.[1] || '15'),
-                         reason: generatedText.match(/"reason":\s*"([^"]+)"/)?.[1] || "Could not parse reason.",
-                         potentialTransitions: generatedText.match(/"potentialTransitions":\s*(\[.*?\])/)?.[1] ? JSON.parse(generatedText.match(/"potentialTransitions":\s*(\[.*?\])/)[1]) : [],
-                         personalizedAdvice: generatedText.match(/"personalizedAdvice":\s*"([^"]+)"/)?.[1] || "Could not parse advice.",
-                         confidenceScore: 0.5
+                        isProductive: generatedText.toLowerCase().includes('"productive"'),
+                        recommendedTime: parseInt(generatedText.match(/"recommendedTime":\s*(\d+)/)?.[1] || '15'),
+                        reason: generatedText.match(/"reason":\s*"([^"]+)"/)?.[1] || "Could not parse reason.",
+                        potentialTransitions: generatedText.match(/"potentialTransitions":\s*(\[.*?\])/)?.[1] ? JSON.parse(generatedText.match(/"potentialTransitions":\s*(\[.*?\])/)[1]) : [],
+                        personalizedAdvice: generatedText.match(/"personalizedAdvice":\s*"([^"]+)"/)?.[1] || "Could not parse advice.",
+                        confidenceScore: 0.5
                     };
-                     console.warn("Using fallback parsing for Gemini response.");
+                    console.warn("Using fallback parsing for Gemini response.");
                 }
 
                 const isProductive = analysisResult.classification?.toLowerCase() === 'productive';
@@ -443,29 +497,25 @@ async function sendToGeminiAPI(videoData) {
 }
 
 function showTimeRecommendation(videoData, analysis) {
-    // Remove any existing notification with the new ID
     const existingNotification = document.getElementById('wellbeing-time-recommendation');
     if (existingNotification) {
         existingNotification.remove();
     }
 
-    // Format transitions as HTML list
-    let transitionsHTML = 'None'; // Default text
+    let transitionsHTML = 'None';
     if (analysis.potentialTransitions && analysis.potentialTransitions.length > 0) {
         transitionsHTML = '<ul>' +
             analysis.potentialTransitions.map(transition => `<li>${transition}</li>`).join('') +
             '</ul>';
     }
 
-    // Determine classification text and class
     const classificationText = analysis.isProductive !== undefined
         ? (analysis.isProductive ? 'Productive' : 'Distracting')
         : 'Unknown';
-    const classificationClass = classificationText.toLowerCase(); // 'productive', 'distracting', or 'unknown'
+    const classificationClass = classificationText.toLowerCase();
 
-    // Create enhanced notification with all Gemini fields
     const notification = document.createElement('div');
-    notification.id = 'wellbeing-time-recommendation'; // Use the new ID
+    notification.id = 'wellbeing-time-recommendation';
     notification.innerHTML = `
         <div class="wellbeing-header">
             <h3>${videoData.title || 'Video Title'}</h3>
@@ -479,10 +529,10 @@ function showTimeRecommendation(videoData, analysis) {
                 <p><strong>Reason:</strong></p>
                 <p>${analysis.reason || 'No reason provided.'}</p>
             </div>
-             <div class="wellbeing-advice">
-                 <p><strong>Advice:</strong></p>
-                 <p>${analysis.personalizedAdvice || 'No advice provided.'}</p>
-             </div>
+            <div class="wellbeing-advice">
+                <p><strong>Advice:</strong></p>
+                <p>${analysis.personalizedAdvice || 'No advice provided.'}</p>
+            </div>
             <div class="wellbeing-transitions">
                 <p><strong>Potential Transitions:</strong></p>
                 ${transitionsHTML}
@@ -490,8 +540,6 @@ function showTimeRecommendation(videoData, analysis) {
         </div>
     `;
 
-    // Add CSS styles for the notification - Injecting styles directly
-    // Check if style already exists to avoid duplicates
     let styleElement = document.getElementById('wellbeing-recommendation-styles');
     if (!styleElement) {
         styleElement = document.createElement('style');
@@ -499,132 +547,123 @@ function showTimeRecommendation(videoData, analysis) {
         styleElement.textContent = `
             #wellbeing-time-recommendation {
                 position: fixed;
-                top: 200px; /* <<< ADJUSTED: Moved down to avoid overlap with timer */
+                top: 200px;
                 right: 20px;
                 width: 320px;
-                background-color: #ffffff; /* White background */
-                color: #333333; /* Darker text */
+                background-color: #ffffff;
+                color: #333333;
                 border-radius: 8px;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); /* Softer shadow */
-                z-index: 9998; /* <<< ADJUSTED: Slightly lower z-index than timer if needed */
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+                z-index: 9998;
                 font-family: 'Roboto', Arial, sans-serif;
                 overflow: hidden;
-                border: 1px solid #e0e0e0; /* Light border */
+                border: 1px solid #e0e0e0;
                 transition: opacity 0.3s ease, transform 0.3s ease;
                 opacity: 1;
                 transform: translateX(0);
             }
             #wellbeing-time-recommendation.hidden {
-                 opacity: 0;
-                 transform: translateX(100%);
-                 pointer-events: none;
+                opacity: 0;
+                transform: translateX(100%);
+                pointer-events: none;
             }
 
             .wellbeing-header {
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
-                padding: 10px 16px; /* Slightly less padding */
-                background-color: #f1f1f1; /* Lighter header */
-                color: #333333; /* Darker header text */
+                padding: 10px 16px;
+                background-color: #f1f1f1;
+                color: #333333;
                 border-bottom: 1px solid #e0e0e0;
             }
 
             .wellbeing-header h3 {
                 margin: 0;
-                font-size: 15px; /* Slightly smaller */
-                font-weight: 500; /* Medium weight */
+                font-size: 15px;
+                font-weight: 500;
                 white-space: nowrap;
                 overflow: hidden;
                 text-overflow: ellipsis;
-                max-width: 250px; /* Adjust width */
+                max-width: 250px;
             }
 
             #wellbeing-close-btn {
                 background: none;
                 border: none;
-                color: #666666; /* Gray close button */
-                font-size: 24px; /* Larger click target */
+                color: #666666;
+                font-size: 24px;
                 cursor: pointer;
                 padding: 0 4px;
                 line-height: 1;
                 font-weight: bold;
             }
-             #wellbeing-close-btn:hover {
-                 color: #333333;
-             }
+            #wellbeing-close-btn:hover {
+                color: #333333;
+            }
 
             .wellbeing-content {
                 padding: 12px 16px;
-                max-height: 300px; /* Limit height and allow scroll */
+                max-height: 300px;
                 overflow-y: auto;
             }
 
             .wellbeing-content p {
-                margin: 6px 0; /* Tighter spacing */
-                font-size: 13px; /* Smaller base font */
+                margin: 6px 0;
+                font-size: 13px;
                 line-height: 1.5;
             }
-             .wellbeing-content p strong {
-                 font-weight: 500; /* Medium weight for labels */
-                 color: #555555;
-             }
+            .wellbeing-content p strong {
+                font-weight: 500;
+                color: #555555;
+            }
 
             .wellbeing-reason, .wellbeing-transitions, .wellbeing-advice {
                 margin-top: 10px;
                 padding-top: 10px;
-                border-top: 1px solid #eeeeee; /* Lighter separator */
+                border-top: 1px solid #eeeeee;
             }
-             .wellbeing-reason p:first-child,
-             .wellbeing-transitions p:first-child,
-             .wellbeing-advice p:first-child {
-                 margin-top: 0; /* Remove extra margin above label */
-             }
+            .wellbeing-reason p:first-child,
+            .wellbeing-transitions p:first-child,
+            .wellbeing-advice p:first-child {
+                margin-top: 0;
+            }
 
-            .productive { /* Style for classification span */
-                color: #2e7d32; /* Darker green */
+            .productive {
+                color: #2e7d32;
                 font-weight: bold;
             }
 
-            .distracting { /* Style for classification span */
-                color: #c62828; /* Darker red */
+            .distracting {
+                color: #c62828;
                 font-weight: bold;
             }
-             .unknown { /* Style for classification span */
-                 color: #757575; /* Gray */
-                 font-weight: normal;
-             }
+            .unknown {
+                color: #757575;
+                font-weight: normal;
+            }
 
             .wellbeing-transitions ul {
                 margin: 4px 0 8px 0;
-                padding-left: 18px; /* Adjust indent */
+                padding-left: 18px;
                 list-style: disc;
             }
-             .wellbeing-transitions li {
-                 margin-bottom: 4px;
-             }
+            .wellbeing-transitions li {
+                margin-bottom: 4px;
+            }
         `;
         document.head.appendChild(styleElement);
     }
 
-    // Append the notification to the body
     document.body.appendChild(notification);
 
-    // Add close button functionality
     const closeButton = document.getElementById('wellbeing-close-btn');
     if (closeButton) {
         closeButton.addEventListener('click', () => {
-            // Optional: Add fade-out effect
             notification.classList.add('hidden');
-            // Remove after transition
             setTimeout(() => {
-                 notification.remove();
-                 // Optionally remove the style element if no other notifications use it
-                 // This might cause issues if another video loads quickly, so maybe leave it.
-                 // if (!document.getElementById('wellbeing-time-recommendation') && styleElement) {
-                 //    styleElement.remove();
-                 // }
-            }, 300); // Match transition duration
+                notification.remove();
+            }, 300);
         });
     } else {
         console.error("Could not find close button for recommendation.");
@@ -645,17 +684,15 @@ function createOrUpdateFloatingTimer() {
             console.log("Timer div not found, creating new one."); // Added log
             timerDiv = document.createElement('div');
             timerDiv.id = 'wellbeing-floating-timer';
-            timerDiv.className = 'wellbeing-timer-display'; // Use class from styles.css
+            timerDiv.className = 'wellbeing-timer-display';
             document.body.appendChild(timerDiv);
             console.log("Timer div appended to body."); // Added log
         } else {
             console.log("Timer div already exists, updating content."); // Added log
         }
 
-        // Fetch actual timer data (e.g., from storage or background script)
-        // For now, using placeholder values
-        const doomscrollingTime = 30 * 60; // Placeholder
-        const gamingTime = 15 * 60; // Placeholder
+        const doomscrollingTime = 30 * 60;
+        const gamingTime = 15 * 60;
 
         timerDiv.innerHTML = `
             <div class="wellbeing-timer-title">Time Limits</div>
@@ -667,7 +704,6 @@ function createOrUpdateFloatingTimer() {
                 <span class="wellbeing-timer-category">Gaming</span>
                 <span class="wellbeing-timer-time" id="timer-gaming-value">${formatTime(gamingTime)}</span>
             </div>
-            <!-- Add more categories as needed -->
         `;
         console.log("Timer div innerHTML updated."); // Added log
     } catch (error) {

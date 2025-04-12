@@ -178,12 +178,30 @@ if (uploadButton) {
         reader.onload = function(e) {
             try {
                 const data = JSON.parse(e.target.result);
+                console.log("Parsed uploaded analysis data:", data);
 
+                // --- SAVE THE ENTIRE UPLOADED DATA OBJECT ---
+                chrome.storage.local.set({ userAnalysisData: data }, () => { // Use new key 'userAnalysisData'
+                    if (chrome.runtime.lastError) {
+                        console.error("Error saving user analysis data to storage:", chrome.runtime.lastError);
+                    } else {
+                        console.log("User analysis data saved to local storage.");
+                        // Notify content script about the update
+                        chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+                            if (tabs && tabs.length > 0 && tabs[0].id) {
+                                chrome.tabs.sendMessage(tabs[0].id, { type: "PROFILE_UPDATED" }); // Keep message type for now
+                            }
+                        });
+                    }
+                });
+                // --- END SAVE DATA ---
+
+                // Send data to content script (if still needed for immediate processing)
                 chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
                     if (tabs && tabs.length > 0 && tabs[0].id) {
                         chrome.tabs.sendMessage(tabs[0].id, {
                             action: "processAnalyzedData",
-                            data: data
+                            data: data // Send the full original data
                         }, function(response) {
                             if (chrome.runtime.lastError) {
                                 console.error("Error sending upload data:", chrome.runtime.lastError.message);
