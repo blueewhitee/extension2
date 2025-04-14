@@ -47,24 +47,49 @@ function initializeExtensionSettings() {
   // chrome.tabs.query({}, (tabs) => { ... });
 }
 
-// --- Inject content script on YouTube navigation ---
+// --- Inject content script or redirect on YouTube navigation ---
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  // Check if the tab is fully loaded and the URL is a YouTube watch or shorts page
-  if (changeInfo.status === 'complete' && tab.url &&
-      (tab.url.includes('youtube.com/watch') || tab.url.includes('youtube.com/shorts'))) {
+  // Check if the URL is present and is a YouTube URL
+  if (tab.url && tab.url.includes('youtube.com')) {
 
-    console.log(`Injecting content script into tab ${tabId} (URL: ${tab.url})`);
-    chrome.scripting.executeScript({
-      target: { tabId: tabId },
-      files: ['content.js'] // Inject content.js
-      // Note: No 'type: "module"' needed here. If content.js uses import,
-      // executeScript handles it correctly as long as the imported file
-      // (config.js) is in web_accessible_resources.
-    }).then(() => {
-      console.log(`Successfully injected content script into tab ${tabId}`);
-    }).catch((error) => {
-      console.error(`Failed to inject content script into tab ${tabId}:`, error);
-    });
+    // --- Redirect Shorts immediately ---
+    if (tab.url.startsWith('https://www.youtube.com/shorts/')) {
+      console.log(`Detected navigation to YouTube Shorts: ${tab.url}. Redirecting...`);
+      chrome.storage.sync.get('timerSettings', (result) => {
+        const settings = result.timerSettings;
+        const redirectUrl = settings?.redirectUrl || 'https://www.google.com'; // Default redirect URL
+        console.log(`Redirecting tab ${tabId} to: ${redirectUrl}`);
+        chrome.tabs.update(tabId, { url: redirectUrl });
+      });
+      return; // Stop further processing for this event
+    }
+    // --- End Redirect Shorts ---
+
+    // Check if the tab is fully loaded and the URL is the YouTube homepage OR a watch page
+    if (changeInfo.status === 'complete' && tab.url && (tab.url === 'https://www.youtube.com/' || tab.url.startsWith('https://www.youtube.com/watch'))) {
+      console.log(`Attempting to inject content script into tab ${tabId} (URL: ${tab.url})`); // Log injection attempt
+      chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        files: ['content.js']
+      }).then(() => {
+        console.log(`Successfully injected content script into tab ${tabId}`);
+      }).catch((error) => {
+        // Refined error handling
+        if (error.message.includes("Cannot create script")) {
+          // This often means the script was already injected, which is usually acceptable.
+          console.warn(`Content script likely already injected in tab ${tabId}. (Error: ${error.message})`);
+        } else if (error.message.includes("No tab with id")) {
+          // Tab might have been closed or navigated away quickly.
+          console.warn(`Tab ${tabId} not found for injection (closed or navigated away?). Error: ${error.message}`);
+        } else if (error.message.includes("Cannot access contents of url")) {
+          // Permissions issue or trying to inject into a restricted page.
+          console.error(`Cannot access contents of URL for tab ${tabId}. Error: ${error.message}`);
+        } else {
+          // Log other unexpected errors during injection.
+          console.error(`Failed to inject content script into tab ${tabId}:`, error);
+        }
+      });
+    }
   }
 });
 
