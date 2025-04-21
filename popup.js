@@ -319,6 +319,9 @@ function initializePopup() {
 
     // Update timer display periodically by fetching from storage
     setInterval(updateTimerDisplay, 1000); // Update display every second
+
+    // Fetch and display current video info
+    updateCurrentVideoInfoDisplay();
 }
 
 // Make sure you have the openTab function defined
@@ -452,6 +455,51 @@ function saveSettings() {
     });
 }
 // --- End missing function definitions ---
+
+// --- Function to get current video info (or handle absence) ---
+function updateCurrentVideoInfoDisplay() {
+    const infoDiv = document.getElementById('current-video-info');
+    if (!infoDiv) return; // Make sure the element exists
+
+    // Default state
+    infoDiv.innerHTML = '<p>Loading video info...</p>';
+
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const currentTab = tabs[0];
+
+        // Check if we are on a page where the content script *should* be injected
+        if (currentTab && currentTab.url && (currentTab.url === 'https://www.youtube.com/' || currentTab.url.startsWith('https://www.youtube.com/watch'))) {
+            console.log("Attempting to get video info from content script...");
+            chrome.tabs.sendMessage(currentTab.id, { action: "getCurrentVideoInfo" }, (response) => {
+                // CRITICAL: Check for errors *first*
+                if (chrome.runtime.lastError) {
+                    console.error("Error contacting content script:", chrome.runtime.lastError.message);
+                    infoDiv.innerHTML = `<p>Could not get video info. Content script might not be ready or running on this page.</p><p><small>Error: ${chrome.runtime.lastError.message}</small></p>`;
+                } else if (response && response.videoInfo) {
+                    console.log("Received video info:", response.videoInfo);
+                    const { title, category, classification } = response.videoInfo;
+                    // Display the received info
+                    infoDiv.innerHTML = `
+                        <p><strong>Title:</strong> ${title || 'N/A'}</p>
+                        <p><strong>Category:</strong> ${category || 'N/A'}</p>
+                        <p><strong>Classification:</strong> ${classification || 'N/A'}</p>
+                    `;
+                } else {
+                    // Response received, but no videoInfo (e.g., on homepage) or unexpected format
+                    console.warn("Received response, but no videoInfo found:", response);
+                     infoDiv.innerHTML = `<p>Video info not available on this page.</p>`;
+                     if (currentTab.url === 'https://www.youtube.com/') {
+                         infoDiv.innerHTML += `<p><small>(Currently on YouTube homepage)</small></p>`;
+                     }
+                }
+            });
+        } else {
+            // Not on youtube.com or a watch page
+            console.log("Not on a supported YouTube page.");
+            infoDiv.innerHTML = '<p>Navigate to a YouTube video page or the homepage to see info.</p>';
+        }
+    });
+}
 
 // Initial call - Use DOMContentLoaded to ensure elements exist
 document.addEventListener('DOMContentLoaded', initializePopup);
